@@ -174,7 +174,7 @@ func (m *model) viewDiag() string {
 			}
 			fixMark := " "
 			if c.Fix != nil {
-				fixMark = sPurple.Render("⚒")
+				fixMark = sPurple.Render("[fix]")
 			}
 			line := mark + " " + padRight(truncate(c.Name, 19), 19) + sDim.Render(truncate(c.Detail, panelWidth-26))
 			if i == m.diagCur {
@@ -191,7 +191,7 @@ func (m *model) viewDiag() string {
 	if m.msg != "" {
 		b.WriteString(m.msgOrHint("") + "\n")
 	}
-	b.WriteString(keyHint("↑↓", "выбор") + "   " + keyHint("enter", "исправить ⚒") + "   " + keyHint("r", "заново") + "   " + keyHint("esc", "назад"))
+	b.WriteString(keyHint("↑↓", "выбор") + "   " + keyHint("enter", "исправить") + "   " + keyHint("r", "заново") + "   " + keyHint("esc", "назад"))
 	return b.String()
 }
 
@@ -208,7 +208,7 @@ func (m *model) diagDetail() string {
 			lines[2] = sDim.Render(truncate(wrapped[2], panelWidth-1) + "…")
 		}
 		if c.Fix != nil {
-			lines[3] = sPurple.Render("⚒ Enter — " + truncate(c.Fix.Label, panelWidth-12))
+			lines[3] = sPurple.Render("Enter — " + truncate(c.Fix.Label, panelWidth-10))
 		}
 	}
 	return strings.Join(lines, "\n") + "\n"

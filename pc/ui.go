@@ -44,8 +44,8 @@ const (
 
 const (
 	panelWidth = 62
-	minWidth   = panelWidth + 4
-	minHeight  = 29
+	minWidth   = panelWidth
+	minHeight  = 24
 )
 
 type tickMsg time.Time
@@ -93,8 +93,9 @@ type model struct {
 	stEdit   *field
 	status   *StationStatus
 	stErr    error
-	checking bool
-	cfgCur   int
+	checking     bool
+	checkStarted time.Time
+	cfgCur       int
 
 	// просмотр текста (информация, логи)
 	txtTitle  string
@@ -613,12 +614,16 @@ func (m *model) View() string {
 			body = m.viewMain()
 		}
 	}
-	if bh := lipgloss.Height(body); m.w < minWidth || m.h < bh+1 {
+	bh := lipgloss.Height(body)
+	if m.w < minWidth || m.h < minHeight {
 		return m.viewTooSmall(bh)
 	}
-	top := 1
-	if extra := m.h - lipgloss.Height(body); extra > 2 {
+	top := 0
+	if extra := m.h - bh; extra > 0 {
 		top = extra / 3
+		if top > 1 {
+			top = 1
+		}
 	}
 	left := (m.w - lipgloss.Width(body)) / 2
 	if left < 0 {
@@ -628,9 +633,9 @@ func (m *model) View() string {
 }
 
 func (m *model) viewTooSmall(needH int) string {
-	return "\n " + sPurple.Render("Окно слишком маленькое") + "\n\n " +
-		sDim.Render(fmt.Sprintf("Нужно минимум %d×%d, сейчас %d×%d.", minWidth, needH+1, m.w, m.h)) + "\n " +
-		sDim.Render("Растяните окно или уменьшите шрифт (Ctrl + колесо мыши).") + "\n\n " +
+	return "\n " + sPurple.Render("Окно консоли слишком маленькое") + "\n\n " +
+		sDim.Render(fmt.Sprintf("Текущий размер: %d×%d (требуется от %d×%d).", m.w, m.h, minWidth, minHeight)) + "\n " +
+		sDim.Render("Пожалуйста, растяните окно консоли.") + "\n\n " +
 		sDim.Render("Ctrl+C — выход")
 }
 
@@ -766,8 +771,8 @@ func (m *model) viewMain() string {
 	b.WriteString(m.viewStats(running))
 	b.WriteString(rule() + "\n")
 	b.WriteString(m.msgOrHint(m.hint()) + "\n")
-	b.WriteString("\n" + m.keys() + "\n")
-	b.WriteString(sWarn.Render(testedShort))
+	b.WriteString("\n" + m.keys() + "\n\n")
+	b.WriteString("  " + sWarn.Render(testedShort))
 	return b.String()
 }
 

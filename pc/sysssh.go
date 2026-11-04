@@ -92,6 +92,10 @@ func askpassMain() {
 }
 
 func sysRun(cfg SSHConfig, cmd string, stdin []byte, timeout time.Duration) (string, int, error) {
+	return sysRunStream(cfg, cmd, stdin, timeout, nil)
+}
+
+func sysRunStream(cfg SSHConfig, cmd string, stdin []byte, timeout time.Duration, onLine func(string)) (string, int, error) {
 	bin := findSSH()
 	if bin == "" {
 		return "", -1, errors.New("в системе нет ssh (OpenSSH-клиента)")
@@ -120,11 +124,17 @@ func sysRun(cfg SSHConfig, cmd string, stdin []byte, timeout time.Duration) (str
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=" + null,
 		"-o", "LogLevel=ERROR",
+		"-o", "GSSAPIAuthentication=no",
+		"-o", "AddressFamily=inet",
 		"-o", "ConnectTimeout=" + strconv.Itoa(secs),
 		"-o", "ServerAliveInterval=10",
 		"-o", "ServerAliveCountMax=6",
-		cfg.User + "@" + cfg.Host, cmd,
 	}
+	if stdin == nil {
+		args = append(args, "-n")
+	}
+	args = append(args, cfg.User+"@"+cfg.Host, cmd)
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, bin, args...)
@@ -148,30 +158,34 @@ func sysRun(cfg SSHConfig, cmd string, stdin []byte, timeout time.Duration) (str
 	c.WaitDelay = 2 * time.Second
 	if stdin != nil {
 		c.Stdin = bytes.NewReader(stdin)
+	} else {
+		c.Stdin = strings.NewReader("")
 	}
-	var out lockedBuf
-	c.Stdout, c.Stderr = &out, &out
+	var lw lineWriter
+	lw.onLine = onLine
+	c.Stdout, c.Stderr = &lw, &lw
 	err = c.Run()
-	s := out.String()
+	lw.Flush()
+	s := lw.String()
 	if len(s) > 4000 {
 		s = s[:4000]
 	}
 	sshLog("системный ssh %s (код=%v):\n%s", cfg.addr(), err, s)
 	if ctx.Err() == context.DeadlineExceeded {
-		return out.String(), -1, fmt.Errorf("команда не завершилась за %d с", int(timeout.Seconds()))
+		return lw.String(), -1, fmt.Errorf("команда не завершилась за %d с", int(timeout.Seconds()))
 	}
 	if err == nil {
-		return out.String(), 0, nil
+		return lw.String(), 0, nil
 	}
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		code := ee.ExitCode()
 		if code == 255 { // ssh сам не смог подключиться
-			return out.String(), -1, sysErr(out.String(), cfg)
+			return lw.String(), -1, sysErr(lw.String(), cfg)
 		}
-		return out.String(), code, nil
+		return lw.String(), code, nil
 	}
-	return out.String(), -1, err
+	return lw.String(), -1, err
 }
 
 func sysErr(out string, cfg SSHConfig) error {

@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	_ "embed"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -49,29 +50,121 @@ func tapMD5() string { s := md5.Sum(tapSO); return hex.EncodeToString(s[:]) }
 
 // ───────────────────────── журнал операции ─────────────────────────
 
+type opStepStatus int
+
+const (
+	stepPending opStepStatus = iota
+	stepRunning
+	stepDone
+	stepFail
+)
+
+type opStep struct {
+	Label  string
+	Desc   string
+	Status opStepStatus
+}
+
 type opLog struct {
 	mu    sync.Mutex
 	lines []string
+	steps []opStep
 }
 
 func (l *opLog) add(s string) {
+	if l == nil {
+		return
+	}
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return
+	}
+	if len(l.lines) > 0 && l.lines[len(l.lines)-1] == s {
+		return
+	}
 	l.lines = append(l.lines, s)
-	l.mu.Unlock()
 }
 
 func (l *opLog) addBlock(s string) {
+	if l == nil {
+		return
+	}
 	for _, ln := range strings.Split(strings.ReplaceAll(strings.TrimSpace(s), "\r", ""), "\n") {
-		if ln = strings.TrimRight(ln, " \t"); ln != "" {
-			l.add("  " + ln)
+		if ln = strings.TrimSpace(ln); ln != "" {
+			l.add(ln)
 		}
 	}
 }
 
 func (l *opLog) snapshot() []string {
+	if l == nil {
+		return nil
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.lines...)
+}
+
+func (l *opLog) setSteps(steps []opStep) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.steps = append([]opStep(nil), steps...)
+}
+
+func (l *opLog) startStep(idx int, desc string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if idx >= 0 && idx < len(l.steps) {
+		l.steps[idx].Status = stepRunning
+		if desc != "" {
+			l.steps[idx].Desc = desc
+		}
+	}
+}
+
+func (l *opLog) doneStep(idx int, desc string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if idx >= 0 && idx < len(l.steps) {
+		l.steps[idx].Status = stepDone
+		if desc != "" {
+			l.steps[idx].Desc = desc
+		}
+	}
+}
+
+func (l *opLog) failStep(idx int, desc string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if idx >= 0 && idx < len(l.steps) {
+		l.steps[idx].Status = stepFail
+		if desc != "" {
+			l.steps[idx].Desc = desc
+		}
+	}
+}
+
+func (l *opLog) getSteps() []opStep {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]opStep(nil), l.steps...)
 }
 
 // ───────────────────────── статус ─────────────────────────
@@ -103,7 +196,7 @@ func (s *StationStatus) UpToDate() bool  { return s.b("so") && s.s("so_md5") == 
 func (s *StationStatus) SSHPortInit() int { return s.n("ssh_init_port") }
 
 func FetchStatus(cfg SSHConfig) (*StationStatus, *Remote, error) {
-	r, err := DialSSH(cfg, 8*time.Second)
+	r, err := DialSSH(cfg, 10*time.Second)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -116,7 +209,7 @@ func FetchStatus(cfg SSHConfig) (*StationStatus, *Remote, error) {
 }
 
 func fetchStatusOn(r *Remote) (*StationStatus, error) {
-	out, _, err := r.RunScript("status.sh", statusSh, 20*time.Second)
+	out, _, err := r.RunScript("status.sh", statusSh, 30*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -142,28 +235,65 @@ func firstLine(s string) string {
 
 // runChecked запускает скрипт и считает успехом только строку RESULT=OK.
 func runChecked(r *Remote, name, body string, log *opLog, timeout time.Duration, args ...string) (map[string]string, error) {
-	out, code, err := r.RunScript(name, body, timeout, args...)
+	return runCheckedStream(r, name, body, log, timeout, nil, args...)
+}
+
+func runCheckedStream(r *Remote, name, body string, log *opLog, timeout time.Duration, onLine func(string), args ...string) (map[string]string, error) {
+	var inBackup bool
+	var backupLines []string
+	var shown []string
+
+	wrappedOnLine := func(line string) {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "LAUNCH_BACKUP_BEGIN" {
+			inBackup = true
+			return
+		}
+		if trimmed == "LAUNCH_BACKUP_END" {
+			inBackup = false
+			if len(backupLines) > 0 {
+				b64Str := strings.Join(backupLines, "")
+				if data, err := base64.StdEncoding.DecodeString(b64Str); err == nil && len(data) > 0 {
+					backupPath := filepath.Join(filepath.Dir(configPath()), "station-launch.json.bak")
+					_ = os.WriteFile(backupPath, data, 0o600)
+					if log != nil {
+						log.add("локальный бэкап сохранён: " + filepath.Base(backupPath))
+					}
+				}
+			}
+			return
+		}
+		if inBackup {
+			backupLines = append(backupLines, trimmed)
+			return
+		}
+
+		if onLine != nil {
+			onLine(line)
+		}
+		if !strings.HasPrefix(trimmed, "RESULT=") && !strings.HasPrefix(trimmed, "OLD=") && !strings.HasPrefix(trimmed, "[STEP:") && trimmed != "" {
+			shown = append(shown, trimmed)
+			if log != nil {
+				log.add(trimmed)
+			}
+		}
+	}
+
+	out, code, err := r.RunScriptStream(name, body, timeout, wrappedOnLine, args...)
 	if err != nil {
 		return nil, err
 	}
-	var shown []string
-	for _, ln := range strings.Split(strings.ReplaceAll(out, "\r", ""), "\n") {
-		if strings.HasPrefix(ln, "RESULT=") || strings.HasPrefix(ln, "OLD=") || strings.TrimSpace(ln) == "" {
-			continue
-		}
-		shown = append(shown, ln)
-	}
-	log.addBlock(strings.Join(shown, "\n"))
 	kv := parseKV(out)
 	if kv["RESULT"] != "OK" {
 		msg := "скрипт на колонке завершился с ошибкой"
-		for _, ln := range shown {
+		for _, ln := range strings.Split(out, "\n") {
+			ln = strings.TrimSpace(ln)
 			if strings.HasPrefix(ln, "ОШИБКА") {
 				msg = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(ln, "ОШИБКА:"), "ОШИБКА"))
 			}
 		}
-		if code != 0 && len(shown) == 0 {
-			msg = fmt.Sprintf("скрипт завершился с кодом %d без вывода", code)
+		if code != 0 && msg == "скрипт на колонке завершился с ошибкой" {
+			msg = fmt.Sprintf("скрипт завершился с кодом %d", code)
 		}
 		return kv, errors.New(msg)
 	}
@@ -172,60 +302,137 @@ func runChecked(r *Remote, name, body string, log *opLog, timeout time.Duration,
 
 // InstallOnStation ставит/обновляет libvqe_tap.so и указывает колонке слать звук на pcIP:port.
 func InstallOnStation(cfg SSHConfig, pcIP string, port int, log *opLog) error {
+	steps := []opStep{
+		{Label: "Связь", Desc: "подключение к " + cfg.addr(), Status: stepRunning},
+		{Label: "Прошивка", Desc: "проверка VQE и aarch64", Status: stepPending},
+		{Label: "Бэкап", Desc: "сохранение launch.json", Status: stepPending},
+		{Label: "Установка", Desc: "загрузка libvqe_tap.so", Status: stepPending},
+		{Label: "Конфиг", Desc: fmt.Sprintf("звук на %s:%d", pcIP, port), Status: stepPending},
+		{Label: "Проверка", Desc: "проверка прав и launch.json", Status: stepPending},
+	}
+	log.setSteps(steps)
 	log.add("подключаюсь к " + cfg.addr() + "…")
-	r, err := DialSSH(cfg, 8*time.Second)
+
+	r, err := DialSSH(cfg, 12*time.Second)
 	if err != nil {
+		log.failStep(0, err.Error())
 		return err
 	}
 	defer r.Close()
-	log.add("подключено как " + cfg.User)
+	log.doneStep(0, fmt.Sprintf("%s@%s (ОК)", cfg.User, cfg.addr()))
+	log.startStep(1, "проверка прошивки и совместимости…")
 
-	log.add("проверяю конфигурацию колонки и создаю бэкап…")
-	if out, code, err := r.Run("cat /system/vendor/quasar/launch.json 2>/dev/null", nil, 10*time.Second); err == nil && code == 0 && len(strings.TrimSpace(out)) > 0 {
-		backupPath := filepath.Join(filepath.Dir(configPath()), "station-launch.json.bak")
-		if _, err := os.Stat(backupPath); os.IsNotExist(err) {
-			_ = os.WriteFile(backupPath, []byte(out), 0o600)
-			log.add("локальная копия конфига сохранена: " + filepath.Base(backupPath))
+	b64SO := base64.StdEncoding.EncodeToString(tapSO)
+	fullScript := fmt.Sprintf("#!/bin/sh\nEMBEDDED_SO_B64=\"%s\"\n%s", b64SO, installSh)
+
+	onLine := func(line string) {
+		switch {
+		case strings.HasPrefix(line, "[STEP:fw:start]"):
+			log.startStep(1, "проверка VQE и aarch64…")
+		case strings.HasPrefix(line, "[STEP:fw:ok]"):
+			log.doneStep(1, "VQE найден, aarch64 совместима")
+			log.startStep(2, "создание резервной копии…")
+		case strings.HasPrefix(line, "[STEP:fw:fail]"):
+			log.failStep(1, strings.TrimPrefix(line, "[STEP:fw:fail] "))
+		case strings.HasPrefix(line, "[STEP:backup:start]"):
+			log.startStep(2, "сохранение бэкапа launch.json…")
+		case strings.HasPrefix(line, "[STEP:backup:ok]"):
+			log.doneStep(2, "бэкап сохранён на колонке и ПК")
+			log.startStep(3, "установка libvqe_tap.so…")
+		case strings.HasPrefix(line, "[STEP:backup:fail]"):
+			log.failStep(2, strings.TrimPrefix(line, "[STEP:backup:fail] "))
+		case strings.HasPrefix(line, "[STEP:install:start]"):
+			log.startStep(3, "установка libvqe_tap.so…")
+		case strings.HasPrefix(line, "[STEP:install:ok]"):
+			log.doneStep(3, "libvqe_tap.so установлен (MD5 OK)")
+			log.startStep(4, "настройка приёмника звука…")
+		case strings.HasPrefix(line, "[STEP:install:fail]"):
+			log.failStep(3, strings.TrimPrefix(line, "[STEP:install:fail] "))
+		case strings.HasPrefix(line, "[STEP:target:start]"):
+			log.startStep(4, fmt.Sprintf("звук на %s:%d…", pcIP, port))
+		case strings.HasPrefix(line, "[STEP:target:ok]"):
+			log.doneStep(4, fmt.Sprintf("звук на %s:%d", pcIP, port))
+			log.startStep(5, "проверка прав и валидация…")
+		case strings.HasPrefix(line, "[STEP:target:fail]"):
+			log.failStep(4, strings.TrimPrefix(line, "[STEP:target:fail] "))
+		case strings.HasPrefix(line, "[STEP:verify:start]"):
+			log.startStep(5, "проверка прав и валидация…")
+		case strings.HasPrefix(line, "[STEP:verify:ok]"):
+			log.doneStep(5, "конфигурация проверена успешно")
+		case strings.HasPrefix(line, "[STEP:verify:fail]"):
+			log.failStep(5, strings.TrimPrefix(line, "[STEP:verify:fail] "))
 		}
 	}
 
-	pkg := "/tmp/alisamic-pkg"
-	if _, _, err := r.Run("rm -rf "+pkg+" && mkdir -p "+pkg, nil, 10*time.Second); err != nil {
-		return err
-	}
-	defer r.Run("rm -rf "+pkg, nil, 10*time.Second)
-
-	log.add("загружаю libvqe_tap.so и установщик…")
-	if err := r.Upload(pkg+"/libvqe_tap.so", tapSO, "755"); err != nil {
-		return err
-	}
-	if err := r.Upload(pkg+"/install.sh", []byte(installSh), "755"); err != nil {
-		return err
-	}
-	// проверка целостности загрузки
-	if out, _, _ := r.Run("md5sum "+pkg+"/libvqe_tap.so 2>/dev/null | cut -d' ' -f1", nil, 10*time.Second); strings.TrimSpace(out) != "" {
-		if strings.TrimSpace(out) != tapMD5() {
-			return errors.New("libvqe_tap.so повредился при загрузке (не совпала контрольная сумма) — повторите")
+	_, err = runCheckedStream(r, "install.sh", fullScript, log, 60*time.Second, onLine, pcIP, strconv.Itoa(port))
+	if err != nil {
+		for i, st := range log.getSteps() {
+			if st.Status == stepRunning {
+				log.failStep(i, err.Error())
+				break
+			}
 		}
+		return err
 	}
-	log.add("запускаю установщик на колонке (создаётся бэкап конфига)…")
-	_, err = runChecked(r, "run-install.sh", "#!/bin/sh\nexec sh "+pkg+"/install.sh \"$@\"\n", log, 60*time.Second, pcIP, strconv.Itoa(port))
-	return err
+	return nil
 }
 
 func UninstallFromStation(cfg SSHConfig, log *opLog) error {
+	steps := []opStep{
+		{Label: "Связь", Desc: "подключение к " + cfg.addr(), Status: stepRunning},
+		{Label: "Бэкап", Desc: "восстановление launch.json", Status: stepPending},
+		{Label: "Очистка", Desc: "удаление libvqe_tap.so и файлов", Status: stepPending},
+		{Label: "Синхронизация", Desc: "сброс кэша ФС (sync)", Status: stepPending},
+	}
+	log.setSteps(steps)
 	log.add("подключаюсь к " + cfg.addr() + "…")
-	r, err := DialSSH(cfg, 8*time.Second)
+
+	r, err := DialSSH(cfg, 12*time.Second)
 	if err != nil {
+		log.failStep(0, err.Error())
 		return err
 	}
 	defer r.Close()
-	log.add("возвращаю launch.json из бэкапа и очищаю файлы…")
-	_, err = runChecked(r, "uninstall.sh", uninstallSh, log, 60*time.Second)
-	if err == nil {
-		log.add("конфигурация колонки успешно возвращена из бэкапа")
+	log.doneStep(0, fmt.Sprintf("%s@%s (ОК)", cfg.User, cfg.addr()))
+	log.startStep(1, "восстановление launch.json из бэкапа…")
+
+	onLine := func(line string) {
+		switch {
+		case strings.HasPrefix(line, "[STEP:restore:start]"):
+			log.startStep(1, "восстановление launch.json…")
+		case strings.HasPrefix(line, "[STEP:restore:ok]"):
+			log.doneStep(1, "launch.json возвращён из бэкапа")
+			log.startStep(2, "удаление файлов…")
+		case strings.HasPrefix(line, "[STEP:restore:fail]"):
+			log.failStep(1, strings.TrimPrefix(line, "[STEP:restore:fail] "))
+		case strings.HasPrefix(line, "[STEP:clean:start]"):
+			log.startStep(2, "удаление libvqe_tap.so и файлов…")
+		case strings.HasPrefix(line, "[STEP:clean:ok]"):
+			log.doneStep(2, "все файлы AlisaMic удалены")
+			log.startStep(3, "синхронизация ФС…")
+		case strings.HasPrefix(line, "[STEP:clean:fail]"):
+			log.failStep(2, strings.TrimPrefix(line, "[STEP:clean:fail] "))
+		case strings.HasPrefix(line, "[STEP:sync:start]"):
+			log.startStep(3, "синхронизация ФС…")
+		case strings.HasPrefix(line, "[STEP:sync:ok]"):
+			log.doneStep(3, "файловая система синхронизирована")
+		case strings.HasPrefix(line, "[STEP:sync:fail]"):
+			log.failStep(3, strings.TrimPrefix(line, "[STEP:sync:fail] "))
+		}
 	}
-	return err
+
+	_, err = runCheckedStream(r, "uninstall.sh", uninstallSh, log, 60*time.Second, onLine)
+	if err != nil {
+		for i, st := range log.getSteps() {
+			if st.Status == stepRunning {
+				log.failStep(i, err.Error())
+				break
+			}
+		}
+		return err
+	}
+	log.add("конфигурация колонки успешно возвращена из бэкапа")
+	return nil
 }
 
 // RebootStation перезагружает колонку и (если wait) ждёт, пока она вернётся.

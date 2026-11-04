@@ -8,6 +8,7 @@ TMP=/tmp/alisamic-launch-restore.new
 
 die() { echo "ОШИБКА: $*"; echo "RESULT=FAIL"; exit 1; }
 
+echo "[STEP:restore:start] Восстановление конфигурации"
 ROOTOPT=$(awk '$2=="/"{print $4}' /proc/mounts | tail -n 1)
 case ",$ROOTOPT," in *,rw,*) WAS_RW=1;; *) WAS_RW=0;; esac
 mount -o remount,rw / || die "не удалось remount rw"
@@ -42,11 +43,19 @@ fi
 if [ "$RESTORED" = "0" ]; then
   echo "launch.json уже в исходном виде (патч не обнаружен)"
 fi
+echo "[STEP:restore:ok] Конфигурация launch.json восстановлена"
 
+echo "[STEP:clean:start] Удаление файлов AlisaMic"
 # 3. Удаляем файлы AlisaMic и бэкапы
 rm -f "$D/libvqe_tap.so" "$D/libvqe_tap.so.new"
 rm -f "$BAK" "$BAK_DATA"
 rmdir "$D" 2>/dev/null
 echo "все файлы AlisaMic на колонке удалены"
+echo "[STEP:clean:ok] Файлы AlisaMic удалены"
+
+echo "[STEP:sync:start] Синхронизация файловой системы"
+sync
+echo "[STEP:sync:ok] Файловая система синхронизирована"
+
 echo "Нужна перезагрузка колонки."
 echo "RESULT=OK"

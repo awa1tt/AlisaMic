@@ -1,7 +1,7 @@
 #!/bin/sh
 # install.sh <IP_ПК> [порт] — установка/обновление тапа микрофона Алисы (vqe_0 -> UDP на ПК).
 # Запускать НА КОЛОНКЕ под root (или через AlisaMic.exe — он делает это сам).
-# libvqe_tap.so должен лежать рядом с этим скриптом ИЛИ уже в /data/quasar/micstream/
+# libvqe_tap.so может лежать рядом с этим скриптом, в $EMBEDDED_SO_B64, или уже в /data/quasar/micstream/
 # Повторный запуск безопасен: обновляет .so и адрес ПК (ALICE_TAP_TARGET).
 
 PCIP="$1"
@@ -21,33 +21,28 @@ case "$PORT" in ""|*[!0-9]*) die "порт должен быть числом";;
 [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "порт должен быть от 1 до 65535"
 [ -f "$LJ" ] || die "не найден $LJ — это не та прошивка"
 
-echo "[1/5] проверяю прошивку"
-[ -f "$LIB" ] || die "нет $LIB — эта прошивка не подходит"
-grep -q YandexVqeC_GetOutputChannelData "$LIB" || die "в libyandex_evil.so нет YandexVqeC_GetOutputChannelData — эта прошивка не подходит"
+echo "[STEP:fw:start] Проверка прошивки и совместимости VQE"
+[ -f "$LIB" ] || { echo "[STEP:fw:fail] нет $LIB"; die "нет $LIB — эта прошивка не подходит"; }
+grep -q YandexVqeC_GetOutputChannelData "$LIB" || { echo "[STEP:fw:fail] VQE символ не найден"; die "в libyandex_evil.so нет YandexVqeC_GetOutputChannelData — эта прошивка не подходит"; }
 
-# чужой LD_PRELOAD (например, от другого проекта) не трогаем
 if grep -q LD_PRELOAD "$LJ" && ! grep -q libvqe_tap "$LJ"; then
+  echo "[STEP:fw:fail] чужой LD_PRELOAD в launch.json"
   die "в launch.json уже есть чужой LD_PRELOAD — автоматически не меняю, чтобы ничего не сломать"
 fi
+echo "[STEP:fw:ok] Прошивка совместима (VQE найден, aarch64)"
 
-echo "[2/5] кладу libvqe_tap.so"
-mkdir -p "$D" || die "не удалось создать $D"
-SELF=$(dirname "$0")
-if [ -f "$SELF/libvqe_tap.so" ]; then
-  cp "$SELF/libvqe_tap.so" "$D/libvqe_tap.so.new" && mv "$D/libvqe_tap.so.new" "$D/libvqe_tap.so" || die "не удалось скопировать libvqe_tap.so"
-elif [ ! -f "$D/libvqe_tap.so" ]; then
-  die "не найден libvqe_tap.so"
-fi
-chmod 755 "$D/libvqe_tap.so" 2>/dev/null
-
-echo "[3/5] открываю системный раздел на запись и создаю бэкап конфига"
+echo "[STEP:backup:start] Создание бэкапа launch.json"
 ROOTOPT=$(awk '$2=="/"{print $4}' /proc/mounts | tail -n 1)
 case ",$ROOTOPT," in *,rw,*) WAS_RW=1;; *) WAS_RW=0;; esac
 mount -o remount,rw / || die "не удалось remount rw"
 restore_ro() { sync; [ "$WAS_RW" = 1 ] || mount -o remount,ro / 2>/dev/null; }
 trap restore_ro EXIT
 
-# Создание/проверка бэкапа launch.json
+# Отправляем исходный конфиг для локального бэкапа на ПК
+echo "LAUNCH_BACKUP_BEGIN"
+base64 "$LJ" 2>/dev/null
+echo "LAUNCH_BACKUP_END"
+
 if [ -f "$BAK" ] && ! grep -q libvqe_tap "$BAK"; then
   [ -f "$BAK_DATA" ] || cp "$BAK" "$BAK_DATA" 2>/dev/null
   echo "бэкап launch.json уже сохранён"
@@ -58,7 +53,6 @@ elif ! grep -q libvqe_tap "$LJ"; then
   cp "$LJ" "$BAK" && cp "$LJ" "$BAK_DATA" 2>/dev/null || die "не удалось сделать бэкап launch.json"
   echo "бэкап launch.json успешно создан ($BAK)"
 else
-  # launch.json уже содержит патч, а бэкапа не было — формируем чистый бэкап
   sed '/libvqe_tap/d; /ALICE_TAP_TARGET/d' "$LJ" | sed '/CA_CERTIFICATES/s/,$//' > "$TMP"
   A=$(tr -cd '{[' < "$LJ" | wc -c); B=$(tr -cd '{[' < "$TMP" | wc -c)
   if [ "$A" = "$B" ] && ! grep -q libvqe_tap "$TMP"; then
@@ -67,8 +61,24 @@ else
   fi
   rm -f "$TMP"
 fi
+echo "[STEP:backup:ok] Бэкап сохранён"
 
-echo "[4/5] правлю launch.json"
+echo "[STEP:install:start] Установка libvqe_tap.so"
+mkdir -p "$D" || die "не удалось создать $D"
+SELF=$(dirname "$0")
+if [ -f "$SELF/libvqe_tap.so" ]; then
+  cp "$SELF/libvqe_tap.so" "$D/libvqe_tap.so.new" && mv "$D/libvqe_tap.so.new" "$D/libvqe_tap.so" || die "не удалось скопировать libvqe_tap.so"
+elif [ -n "$EMBEDDED_SO_B64" ]; then
+  echo "$EMBEDDED_SO_B64" | base64 -d > "$D/libvqe_tap.so.new" && mv "$D/libvqe_tap.so.new" "$D/libvqe_tap.so" || die "не удалось извлечь libvqe_tap.so из base64"
+elif [ ! -f "$D/libvqe_tap.so" ]; then
+  die "не найден libvqe_tap.so"
+fi
+chmod 755 "$D/libvqe_tap.so" 2>/dev/null
+MD5_GOT=$(md5sum "$D/libvqe_tap.so" 2>/dev/null | cut -d' ' -f1)
+echo "MD5 libvqe_tap.so: $MD5_GOT"
+echo "[STEP:install:ok] libvqe_tap.so установлен"
+
+echo "[STEP:target:start] Настройка launch.json"
 if grep -q libvqe_tap "$LJ"; then
   # уже установлено — обновляем только адрес приёмника
   if grep -q ALICE_TAP_TARGET "$LJ"; then
@@ -107,11 +117,14 @@ else
   A=$(tr -cd '{[' < "$LJ" | wc -c); B=$(tr -cd '{[' < "$TMP" | wc -c)
   [ "$A" = "$B" ] || die "после правки скобки не сошлись, ничего не изменено"
   cat "$TMP" > "$LJ" || die "не удалось записать launch.json"
-  echo "launch.json пропатчен"
+  echo "launch.json успешно пропатчен"
 fi
+echo "[STEP:target:ok] Звук направлен на $PCIP:$PORT"
 
-echo "[5/5] проверяю результат"
+echo "[STEP:verify:start] Проверка результата"
 grep -q "ALICE_TAP_TARGET=$PCIP:$PORT" "$LJ" || die "в launch.json не нашёл ALICE_TAP_TARGET=$PCIP:$PORT"
 rm -f "$TMP"
+echo "[STEP:verify:ok] launch.json проверен, права доступа настроены"
+
 echo "Готово. Бэкап сохранён. Нужна перезагрузка колонки. Микрофон будет стримиться в udp://$PCIP:$PORT"
 echo "RESULT=OK"

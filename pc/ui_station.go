@@ -23,6 +23,7 @@ type busyState struct {
 type resultState struct {
 	title string
 	lines []string
+	steps []opStep
 	err   error
 	ok    string
 	next  func(m *model) tea.Cmd
@@ -56,6 +57,7 @@ type opDoneMsg struct {
 	id    int
 	title string
 	lines []string
+	steps []opStep
 	res   opResult
 }
 
@@ -80,7 +82,7 @@ func (m *model) startOp(title string, fn func(l *opLog) opResult) tea.Cmd {
 			}()
 			res = fn(l)
 		}()
-		return opDoneMsg{id: id, title: title, lines: l.snapshot(), res: res}
+		return opDoneMsg{id: id, title: title, lines: l.snapshot(), steps: l.getSteps(), res: res}
 	}
 }
 
@@ -99,7 +101,7 @@ func (m *model) onOpDone(msg opDoneMsg) tea.Cmd {
 		}
 		return cmd
 	}
-	m.res = &resultState{title: msg.title, lines: msg.lines, err: msg.res.err, ok: msg.res.ok, next: msg.res.next}
+	m.res = &resultState{title: msg.title, lines: msg.lines, steps: msg.steps, err: msg.res.err, ok: msg.res.ok, next: msg.res.next}
 	return cmd
 }
 
@@ -188,12 +190,36 @@ func (m *model) viewBusy() string {
 	frame := spinFrames[int(time.Since(b.started)/(80*time.Millisecond))%len(spinFrames)]
 	s.WriteString(gradientText(b.title) + "\n" + rule() + "\n\n")
 	s.WriteString(sPurple.Render(frame) + " " + sValue.Render("выполняется…") + sDim.Render(fmt.Sprintf("  %d с", int(time.Since(b.started).Seconds()))) + "\n\n")
-	lines := lastN(indentLines(wrapLines(b.log.snapshot(), panelWidth-2), "  "), 14)
-	for _, l := range lines {
-		s.WriteString(sDim.Render(l) + "\n")
-	}
-	for i := len(lines); i < 14; i++ {
+
+	steps := b.log.getSteps()
+	if len(steps) > 0 {
+		for _, st := range steps {
+			var mark string
+			switch st.Status {
+			case stepDone:
+				mark = sOK.Render("✓")
+			case stepRunning:
+				mark = sPurple.Render(frame)
+			case stepFail:
+				mark = sBad.Render("✕")
+			default:
+				mark = sDim.Render("–")
+			}
+			s.WriteString(mark + " " + sDim.Render(padRight(st.Label, 15)) + "  " + truncate(st.Desc, panelWidth-20) + "\n")
+		}
 		s.WriteString("\n")
+		raw := b.log.snapshot()
+		if len(raw) > 0 {
+			s.WriteString(sDim.Render(rule()) + "\n")
+			for _, l := range lastN(raw, 3) {
+				s.WriteString(sDim.Render("  > "+truncate(l, panelWidth-6)) + "\n")
+			}
+		}
+	} else {
+		lines := lastN(indentLines(wrapLines(b.log.snapshot(), panelWidth-2), "  "), 10)
+		for _, l := range lines {
+			s.WriteString(sDim.Render(l) + "\n")
+		}
 	}
 	s.WriteString("\n" + rule() + "\n" + sDim.Render("Не закрывайте программу и не отключайте питание колонки"))
 	return s.String()
@@ -207,13 +233,29 @@ func (m *model) viewResult() string {
 		mark = sBad.Render("✕ ")
 	}
 	s.WriteString(mark + gradientText(r.title) + "\n" + rule() + "\n\n")
-	lines := lastN(indentLines(wrapLines(r.lines, panelWidth-2), "  "), 12)
-	for _, l := range lines {
-		s.WriteString(sDim.Render(l) + "\n")
-	}
-	if len(lines) > 0 {
+
+	if len(r.steps) > 0 {
+		for _, st := range r.steps {
+			var smark string
+			switch st.Status {
+			case stepDone:
+				smark = sOK.Render("✓")
+			case stepFail:
+				smark = sBad.Render("✕")
+			default:
+				smark = sDim.Render("–")
+			}
+			s.WriteString(smark + " " + sDim.Render(padRight(st.Label, 15)) + "  " + truncate(st.Desc, panelWidth-20) + "\n")
+		}
+		s.WriteString("\n" + rule() + "\n\n")
+	} else if len(r.lines) > 0 {
+		lines := lastN(indentLines(wrapLines(r.lines, panelWidth-2), "  "), 8)
+		for _, l := range lines {
+			s.WriteString(sDim.Render(l) + "\n")
+		}
 		s.WriteString("\n")
 	}
+
 	if r.err != nil {
 		for _, l := range indentLines(wrapLines([]string{r.err.Error()}, panelWidth-2), "  ") {
 			s.WriteString(sBad.Render(l) + "\n")
@@ -248,7 +290,7 @@ func (m *model) viewConfirm() string {
 	var s strings.Builder
 	title := gradientText(c.title)
 	if c.danger {
-		title = sBad.Render("⚠ ") + title
+		title = sBad.Render("! ") + title
 	}
 	s.WriteString(title + "\n" + rule() + "\n\n")
 	for _, l := range wrapLines(c.lines, panelWidth) {
@@ -438,6 +480,7 @@ func (m *model) checkCmd() tea.Cmd {
 		return nil
 	}
 	m.checking = true
+	m.checkStarted = time.Now()
 	m.stErr = nil
 	cfg := m.sshCfg()
 	return func() tea.Msg {
@@ -523,13 +566,19 @@ func (m *model) askReboot() tea.Cmd {
 func (m *model) statusLines() []string {
 	var out []string
 	row := func(mark, label, text string) {
-		out = append(out, mark+" "+sDim.Render(padRight(label, 11))+truncate(text, panelWidth-14))
+		out = append(out, mark+" "+sDim.Render(padRight(label, 12))+"  "+truncate(text, panelWidth-17))
 	}
 	ok, warn, bad, dim := sOK.Render("✓"), sWarn.Render("!"), sBad.Render("✕"), sDim.Render("–")
 	switch {
 	case m.checking:
-		row(sBlue.Render("◌"), "Связь", "проверяю…")
-		return append(out, "", "", "", "")
+		frame := spinFrames[int(time.Since(m.checkStarted)/(80*time.Millisecond))%len(spinFrames)]
+		sec := int(time.Since(m.checkStarted).Seconds())
+		row(sPurple.Render(frame), "Связь", fmt.Sprintf("подключаюсь к %s@%s (%d с)…", m.set.SSHUser, m.set.SSHHost, sec))
+		row(dim, "Прошивка", "ожидание ответа колонки…")
+		row(dim, "Скрипт", "ожидание ответа колонки…")
+		row(dim, "Приёмник", "ожидание ответа колонки…")
+		row(dim, "В работе", "ожидание ответа колонки…")
+		return out
 	case m.stErr != nil:
 		row(bad, "Связь", m.stErr.Error())
 		return append(out, "", "", "", "")
@@ -581,7 +630,8 @@ func (m *model) viewStation() string {
 	conn := sDim.Render("○ не проверена")
 	switch {
 	case m.checking:
-		conn = sBlue.Render("◌ проверяю…")
+		frame := spinFrames[int(time.Since(m.checkStarted)/(80*time.Millisecond))%len(spinFrames)]
+		conn = sPurple.Render(frame + " опрос…")
 	case m.stErr != nil:
 		conn = sBad.Render("● нет связи")
 	case m.status != nil:
@@ -612,12 +662,12 @@ func (m *model) viewStation() string {
 	rows[sPass] = lrow{label: "Пароль", value: val(sPass, pass)}
 	rows[sSave] = lrow{label: "Запомнить пароль", value: onOff(m.set.SavePass)}
 	rows[sPC] = lrow{label: "IP этого ПК", value: val(sPC, pc), gap: true}
-	rows[sCheck] = lrow{label: "▶ Проверить колонку"}
-	rows[sInstall] = lrow{label: "⬇ Установить / обновить скрипт"}
-	rows[sRemove] = lrow{label: "✕ Удалить скрипт с колонки"}
-	rows[sCfg] = lrow{label: "⚙ Настройки колонки (SSH, пароль)…"}
-	rows[sDiag] = lrow{label: "✚ Диагностика…"}
-	rows[sBack] = lrow{label: "← Назад"}
+	rows[sCheck] = lrow{label: "Проверить колонку"}
+	rows[sInstall] = lrow{label: "Установить / обновить скрипт"}
+	rows[sRemove] = lrow{label: "Удалить скрипт с колонки"}
+	rows[sCfg] = lrow{label: "Настройки колонки (SSH, пароль)…"}
+	rows[sDiag] = lrow{label: "Диагностика…"}
+	rows[sBack] = lrow{label: "Назад"}
 
 	var b strings.Builder
 	b.WriteString(m.headerWith("Колонка · SSH", conn) + "\n" + rule() + "\n\n")
@@ -841,7 +891,7 @@ func (m *model) viewCfg() string {
 	rows[cInfo] = lrow{label: "Информация о колонке"}
 	rows[cLogs] = lrow{label: "Логи колонки"}
 	rows[cForget] = lrow{label: "Забыть ключ SSH колонки"}
-	rows[cBack] = lrow{label: "← Назад"}
+	rows[cBack] = lrow{label: "Назад"}
 
 	var b strings.Builder
 	conn := sDim.Render(m.set.SSHHost)

@@ -66,14 +66,7 @@ func DialSSH(cfg SSHConfig, timeout time.Duration) (*Remote, error) {
 	}
 	sshLog("▶ подключаюсь к %s (user=%s)", cfg.addr(), cfg.User)
 	if sysPreferred(cfg) {
-		r, err := dialSys(cfg, timeout)
-		if err == nil {
-			return r, nil
-		}
-		sshLog("системный ssh %s: %v", cfg.addr(), err)
-		if isAuthErr(err) {
-			return nil, err
-		}
+		return &Remote{sys: true, cfg: cfg, LocalIP: localIPFor(cfg.Host)}, nil
 	}
 	r, retry, err := dialGo(cfg, timeout)
 	if err == nil {
@@ -200,29 +193,66 @@ func explainSSHErr(err error, cfg SSHConfig) error {
 	return fmt.Errorf("SSH: %v", err)
 }
 
-type lockedBuf struct {
-	mu sync.Mutex
-	b  bytes.Buffer
+type lineWriter struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	out    bytes.Buffer
+	onLine func(string)
 }
 
-func (l *lockedBuf) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
+func (w *lineWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.out.Write(p)
+	w.buf.Write(p)
+	for {
+		line, err := w.buf.ReadString('\n')
+		if err != nil {
+			w.buf.WriteString(line)
+			break
+		}
+		l := strings.TrimRight(line, "\r\n")
+		if w.onLine != nil && l != "" {
+			w.onLine(l)
+		}
+	}
+	return len(p), nil
 }
-func (l *lockedBuf) String() string { l.mu.Lock(); defer l.mu.Unlock(); return l.b.String() }
+
+func (w *lineWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.buf.Len() > 0 {
+		l := strings.TrimRight(w.buf.String(), "\r\n")
+		if w.onLine != nil && l != "" {
+			w.onLine(l)
+		}
+		w.buf.Reset()
+	}
+}
+
+func (w *lineWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.out.String()
+}
 
 // Run выполняет команду; stdout и stderr объединяются. code = -1, если статус не получен.
 func (r *Remote) Run(cmd string, stdin []byte, timeout time.Duration) (string, int, error) {
+	return r.RunStream(cmd, stdin, timeout, nil)
+}
+
+func (r *Remote) RunStream(cmd string, stdin []byte, timeout time.Duration, onLine func(string)) (string, int, error) {
 	if r.sys {
-		return sysRun(r.cfg, cmd, stdin, timeout)
+		return sysRunStream(r.cfg, cmd, stdin, timeout, onLine)
 	}
 	sess, err := r.cli.NewSession()
 	if err != nil {
 		return "", -1, fmt.Errorf("не удалось открыть сеанс: %v", err)
 	}
 	defer sess.Close()
-	var out lockedBuf
+	var out lineWriter
+	out.onLine = onLine
 	sess.Stdout, sess.Stderr = &out, &out
 	if stdin != nil {
 		sess.Stdin = bytes.NewReader(stdin)
@@ -236,8 +266,10 @@ func (r *Remote) Run(cmd string, stdin []byte, timeout time.Duration) (string, i
 	case err = <-done:
 	case <-time.After(timeout):
 		sess.Close()
+		out.Flush()
 		return out.String(), -1, fmt.Errorf("команда не завершилась за %d с", int(timeout.Seconds()))
 	}
+	out.Flush()
 	if err == nil {
 		return out.String(), 0, nil
 	}
@@ -270,20 +302,17 @@ func (r *Remote) Upload(path string, data []byte, mode string) error {
 	return nil
 }
 
-// RunScript заливает скрипт во /tmp и запускает его через sh (так скрипт может читать stdin сам).
+// RunScript запускает скрипт через sh -s, передавая тело скрипта на stdin (без лишних файлов во /tmp).
 func (r *Remote) RunScript(name, body string, timeout time.Duration, args ...string) (string, int, error) {
-	path := "/tmp/alisamic-" + name
-	if err := r.Upload(path, []byte(body), "700"); err != nil {
-		return "", -1, err
-	}
-	cmd := "sh " + shQuote(path)
+	return r.RunScriptStream(name, body, timeout, nil, args...)
+}
+
+func (r *Remote) RunScriptStream(name, body string, timeout time.Duration, onLine func(string), args ...string) (string, int, error) {
+	cmd := "sh -s --"
 	for _, a := range args {
 		cmd += " " + shQuote(a)
 	}
-	cmd += " </dev/null 2>&1"
-	out, code, err := r.Run(cmd, nil, timeout)
-	_, _, _ = r.Run("rm -f "+shQuote(path), nil, 5*time.Second)
-	return out, code, err
+	return r.RunStream(cmd, []byte(body), timeout, onLine)
 }
 
 // ──────────────── ожидание перезагрузки ────────────────
