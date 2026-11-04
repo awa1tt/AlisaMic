@@ -1,0 +1,13 @@
+# Executables & built binaries (uploaded to GitHub Releases)
+*.exe
+*.zip
+
+# Local configuration & logs (contain personal credentials/logs)
+alisa-mic.json
+alisa-mic-ssh.log
+alisa-mic-hosts.json
+*.tmp
+
+# System files
+.DS_Store
+Thumbs.db
