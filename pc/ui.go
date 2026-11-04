@@ -755,7 +755,7 @@ func (m *model) viewMain() string {
 	rows[itMonitor] = lrow{label: "Проверка микрофона"}
 	rows[itStation] = lrow{label: "Колонка (SSH)…", value: station}
 	rows[itDiag] = lrow{label: "Диагностика…"}
-	rows[itAbout] = lrow{label: "Отказ от ответственности"}
+	rows[itAbout] = lrow{label: "О программе (About)…"}
 	rows[itQuit] = lrow{label: "Выход"}
 
 	var b strings.Builder
@@ -840,7 +840,7 @@ func (m *model) hint() string {
 	case itDiag:
 		return "Найти, почему микрофон не работает, и исправить"
 	case itAbout:
-		return "Важно: что проверено и за что вы отвечаете сами"
+		return "Описание работы, ссылка на репозиторий и отказ от ответственности"
 	}
 	return "Настройки сохраняются автоматически"
 }
@@ -888,7 +888,7 @@ func (m *model) viewMonitor() string {
 
 func (m *model) viewDisclaimer() string {
 	var b strings.Builder
-	b.WriteString(gradientText("AlisaMic") + "  " + sBad.Render("DANGER · ОТКАЗ ОТ ОТВЕТСТВЕННОСТИ") + "\n" + rule() + "\n")
+	b.WriteString(gradientText("AlisaMic") + "  " + sDim.Render(version) + "  " + sPurple.Render("О ПРОГРАММЕ (ABOUT)") + "\n" + rule() + "\n")
 	b.WriteString(sWarn.Render(testedOnly) + "\n\n")
 	wrap := lipgloss.NewStyle().Width(panelWidth)
 	for _, p := range disclaimerParagraphs {
