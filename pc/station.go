@@ -10,8 +10,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -239,32 +237,11 @@ func runChecked(r *Remote, name, body string, log *opLog, timeout time.Duration,
 }
 
 func runCheckedStream(r *Remote, name, body string, log *opLog, timeout time.Duration, onLine func(string), args ...string) (map[string]string, error) {
-	var inBackup bool
-	var backupLines []string
 	var shown []string
 
 	wrappedOnLine := func(line string) {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "LAUNCH_BACKUP_BEGIN" {
-			inBackup = true
-			return
-		}
-		if trimmed == "LAUNCH_BACKUP_END" {
-			inBackup = false
-			if len(backupLines) > 0 {
-				b64Str := strings.Join(backupLines, "")
-				if data, err := base64.StdEncoding.DecodeString(b64Str); err == nil && len(data) > 0 {
-					backupPath := filepath.Join(filepath.Dir(configPath()), "station-launch.json.bak")
-					_ = os.WriteFile(backupPath, data, 0o600)
-					if log != nil {
-						log.add("локальный бэкап сохранён: " + filepath.Base(backupPath))
-					}
-				}
-			}
-			return
-		}
-		if inBackup {
-			backupLines = append(backupLines, trimmed)
+		if trimmed == "LAUNCH_BACKUP_BEGIN" || trimmed == "LAUNCH_BACKUP_END" {
 			return
 		}
 

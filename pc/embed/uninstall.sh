@@ -46,11 +46,11 @@ fi
 echo "[STEP:restore:ok] Конфигурация launch.json восстановлена"
 
 echo "[STEP:clean:start] Удаление файлов AlisaMic"
-# 3. Удаляем файлы AlisaMic и бэкапы
+# 3. Удаляем файлы AlisaMic (бэкап в /data/quasar сохраняем в безопасности!)
 rm -f "$D/libvqe_tap.so" "$D/libvqe_tap.so.new"
-rm -f "$BAK" "$BAK_DATA"
+rm -f "$BAK"
 rmdir "$D" 2>/dev/null
-echo "все файлы AlisaMic на колонке удалены"
+echo "файлы AlisaMic удалены (оригинальный бэкап $BAK_DATA сохранён)"
 echo "[STEP:clean:ok] Файлы AlisaMic удалены"
 
 echo "[STEP:sync:start] Синхронизация файловой системы"

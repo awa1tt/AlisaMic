@@ -4,9 +4,11 @@
 
 # Local configuration & logs (contain personal credentials/logs)
 alisa-mic.json
+alisa-mic.json.bak
 alisa-mic-ssh.log
 alisa-mic-hosts.json
-*.tmp
+station-launch.json.bak
+*.bak
 
 # System files
 .DS_Store

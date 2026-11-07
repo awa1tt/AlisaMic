@@ -26,8 +26,11 @@ var (
 	sshLogM sync.Mutex
 )
 
-// sshLog пишет подробности в alisa-mic-ssh.log (рядом с настройками) — для разбора проблем.
+// sshLog пишет подробности в alisa-mic-ssh.log только при включённом ALISAMIC_DEBUG=1.
 func sshLog(format string, a ...any) {
+	if os.Getenv("ALISAMIC_DEBUG") != "1" {
+		return
+	}
 	sshLogM.Lock()
 	defer sshLogM.Unlock()
 	p := pickConfigPath("alisa-mic-ssh.log")
